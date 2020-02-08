@@ -464,7 +464,8 @@ module TypeSubstitutionMapping = struct
                     type_arguments |> List.map (apply_substitution_to_mono_type type_substitution_map)
                 ) 
     
-    let rec make_type_substitution_unifying (type_substitution_map: t) left_type right_type =
+    (** Create a new type substition mapping such that applying that mapping to the left and right types yields the same type. *)
+    let rec make_type_substitution_unifying_exn (type_substitution_map: t) left_type right_type =
         let sub = apply_substitution_to_mono_type type_substitution_map in
         match (sub left_type, sub right_type) with
         | TypeVariableName left_name, TypeVariableName right_name when left_name = right_name -> 
@@ -477,10 +478,10 @@ module TypeSubstitutionMapping = struct
             
         | _, TypeVariableName _ -> 
             (* flip the arguments so we can always do case analysis on a left-side type variable *)
-            make_type_substitution_unifying type_substitution_map right_type left_type
+            make_type_substitution_unifying_exn type_substitution_map right_type left_type
         
         | MultiParameterFunctionType (left_parameter_types, left_return_type), MultiParameterFunctionType (right_parameter_types, right_return_type) -> 
-            make_type_substitution_unifying 
+            make_type_substitution_unifying_exn 
                 (of_types type_substitution_map left_parameter_types right_parameter_types )
                 left_return_type 
                 right_return_type 
@@ -492,7 +493,7 @@ module TypeSubstitutionMapping = struct
             failwith (Printf.sprintf "Unable to unify type %s and %s" (MonoType.to_string left_type') (MonoType.to_string right_type'))            
     and of_types (type_substitution_map: t) left_types right_types =
         List.combine left_types right_types
-        |> List.fold_left (fun current_substitution_map (left_param_type, right_param_type) -> make_type_substitution_unifying current_substitution_map left_param_type right_param_type) type_substitution_map
+        |> List.fold_left (fun current_substitution_map (left_param_type, right_param_type) -> make_type_substitution_unifying_exn current_substitution_map left_param_type right_param_type) type_substitution_map
     
     let rename_type_variables t = StateM.(
         let get_name k = 
@@ -546,7 +547,8 @@ module TypeScheme = struct
             MonoType.free_type_variables mono_type
             , mono_type
         )
-
+    
+    (** Rename the type variables of the type_scheme at the point of instantiation (the goal is to avoid capture.) *)
     let instantiate_type_scheme_to_mono_type (ForAll (type_variable_set, mono_type): t) new_type_variable : (int, MonoType.t) StateM.t = StateM.(
         let original_type_variable_names = type_variable_set |> StringSet.elements in
         (StateM.repeat (original_type_variable_names |> List.length) new_type_variable)
@@ -644,7 +646,7 @@ module ExpressionTyping = struct
         >>= fun _ -> return (MonoType.TypeVariableName (Printf.sprintf "T%d" type_variable_count))
     )
 
-    let rec solve 
+    let rec infer_exn 
         (typing_environment: VariableTypingEnvironment.t) 
         (type_substitution_map: TypeSubstitutionMapping.t) 
         (expression: Expression.t) 
@@ -660,7 +662,7 @@ module ExpressionTyping = struct
                     let type_after_substitution = TypeSubstitutionMapping.apply_substitution_to_mono_type type_substitution_map mono_type_of_variable in
                     Printf.sprintf "Found variable %s of type %s which becomes %s after substitution" variable_name (MonoType.to_string mono_type_of_variable) (MonoType.to_string type_after_substitution) |> debug;  
                     return (
-                        TypeSubstitutionMapping.make_type_substitution_unifying 
+                        TypeSubstitutionMapping.make_type_substitution_unifying_exn 
                             type_substitution_map 
                             expected_type 
                             type_after_substitution
@@ -671,20 +673,20 @@ module ExpressionTyping = struct
             )
         | LetExpression {variable_name; variable_expression; body_expression} ->
             new_type_variable
-            >>= fun new_type_variable_for_expression -> solve typing_environment type_substitution_map variable_expression new_type_variable_for_expression 
+            >>= fun new_type_variable_for_expression -> infer_exn typing_environment type_substitution_map variable_expression new_type_variable_for_expression 
             >>= fun new_type_substition_map ->
                 let local_type_for_expression = TypeSubstitutionMapping.apply_substitution_to_mono_type new_type_substition_map new_type_variable_for_expression in
                 let new_environment = VariableTypingEnvironment.bind_variable_to_type_scheme 
                     variable_name 
                     (VariableTypingEnvironment.make_type_scheme_from_mono_type typing_environment local_type_for_expression)
                     typing_environment in
-                solve new_environment new_type_substition_map body_expression expected_type 
+                infer_exn new_environment new_type_substition_map body_expression expected_type 
         | FunctionDefinition { parameter_names; function_body } ->
             StateM.repeat (List.length parameter_names) new_type_variable 
             >>= fun parameter_type_variables -> new_type_variable            
             >>= fun return_type_type_variable -> 
                 let new_substitution_map = 
-                    TypeSubstitutionMapping.make_type_substitution_unifying 
+                    TypeSubstitutionMapping.make_type_substitution_unifying_exn 
                         type_substitution_map 
                         expected_type 
                         (MultiParameterFunctionType (parameter_type_variables, return_type_type_variable)) in
@@ -701,17 +703,17 @@ module ExpressionTyping = struct
                         ) 
                         typing_environment                       
                     ) in
-                solve environment_with_function_parameters new_substitution_map function_body return_type_type_variable                  
+                infer_exn environment_with_function_parameters new_substitution_map function_body return_type_type_variable                  
         | FunctionApplication { function_expression; argument_values } -> 
             StateM.repeat (List.length argument_values) new_type_variable
             >>= fun parameter_type_variables -> 
-                solve typing_environment type_substitution_map function_expression (MultiParameterFunctionType (parameter_type_variables, expected_type)) 
+                infer_exn typing_environment type_substitution_map function_expression (MultiParameterFunctionType (parameter_type_variables, expected_type)) 
             >>= fun substitution_map_for_function_body -> 
                 let parameter_type_and_variable_expressions = List.combine parameter_type_variables argument_values in
                 let rec state_fold current_type_substition_map = function
                     | [] -> return current_type_substition_map
                     | (parameter_type, argument_value_expression)::remaining ->
-                        solve typing_environment current_type_substition_map argument_value_expression parameter_type 
+                        infer_exn typing_environment current_type_substition_map argument_value_expression parameter_type 
                         >>= fun new_type_substitution_map -> (state_fold new_type_substitution_map remaining) in
                 state_fold substitution_map_for_function_body parameter_type_and_variable_expressions                                     
     )
@@ -719,7 +721,7 @@ module ExpressionTyping = struct
     let type_of typing_environment expression = StateM.(
         let state_monad_of_typing exp =
             new_type_variable
-            >>= fun expression_type_variable -> solve typing_environment TypeSubstitutionMapping.empty exp expression_type_variable
+            >>= fun expression_type_variable -> infer_exn typing_environment TypeSubstitutionMapping.empty exp expression_type_variable
             >>= fun type_substitution_map -> 
                 Printf.sprintf "Ready for final substitution!" |> debug; 
                 return (TypeSubstitutionMapping.apply_substitution_to_mono_type type_substitution_map expression_type_variable)
@@ -932,7 +934,7 @@ let test_cases =
     ; test_case_24
     ]
 
-let type_string_of_expression_string expression_string =
+let type_string_of_expression_string_exn expression_string =
     let expression = match (Parser.parse ExpressionParser.expression_parser expression_string) with
         | Some expression -> expression
         | None -> failwith "failed to parse expression!" in
@@ -944,13 +946,13 @@ let type_string_of_expression_string expression_string =
     )
 
 let run_test_case (given_expression, then_expect_type) =
-    let actual_type = type_string_of_expression_string given_expression in
+    let actual_type = type_string_of_expression_string_exn given_expression in
     if actual_type = then_expect_type
     then None
     else Some (Printf.sprintf "Given expression:\n\t%s\nExpected type:\n\t%s\nActual type:\n\t%s\n" given_expression then_expect_type actual_type)
 
 let hacker_rank_driver () = 
-    type_string_of_expression_string (read_line ())
+    type_string_of_expression_string_exn (read_line ())
     |> print_endline
 
 let test_driver () =

@@ -352,7 +352,7 @@ module Expression = struct
                 lead_neg_char::rest
             | _ -> chars in
         match (expression_parser leading_neg_chars) with
-        | Some (expr, remaining) -> (
+        | Some (expr, _remaining) -> (
             (* print_endline (Printf.sprintf "%d chars remaining" (List.length remaining)); *)
             expr
         )
@@ -392,7 +392,7 @@ module Expression = struct
 
     let indent_string level = String.init (level * 2) (fun _ -> ' ')
     
-    let debug_expression indent before_expression after_expression = 
+    let debug_expression _indent _before_expression after_expression = 
         (
             (*
             let before = before_expression |> to_string in

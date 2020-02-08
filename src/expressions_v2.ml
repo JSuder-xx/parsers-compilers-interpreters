@@ -281,7 +281,7 @@ let modulo_field n =
     then (res + prime_number)
     else res
 
-let lift2_modulo_field (label: string) fn (l: int) (r: int) = 
+let lift2_modulo_field (_label: string) fn (l: int) (r: int) = 
     (
         (* (Printf.printf "%d %s %d\n" l label r);*)
         (* (fn (modulo_field l) (modulo_field r)) |> modulo_field *)
